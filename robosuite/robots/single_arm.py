@@ -84,6 +84,8 @@ class SingleArm(Manipulator):
         self.recent_ee_vel = None  # Current and last eef velocity
         self.recent_ee_vel_buffer = None  # RingBuffer holding prior 10 values of velocity values
         self.recent_ee_acc = None  # Current and last eef acceleration
+        initial_qpos =np.array ([-0.44227073,  1.04602588, -0.05149248, -1.6102527,  1.04177002,  1.42582655,
+                            -2.11462576])
 
         super().__init__(
             robot_type=robot_type,
@@ -174,16 +176,24 @@ class SingleArm(Manipulator):
         """
         # First, run the superclass method to reset the position and controller
         super().reset(deterministic)
-
+        # import ipdb; ipdb.set_trace()
         # Now, reset the gripper if necessary
         if self.has_gripper:
             if not deterministic:
                 self.sim.data.qpos[self._ref_gripper_joint_pos_indexes] = self.gripper.init_qpos
-
+                print (self.gripper.init_qpos)
             self.gripper.current_action = np.zeros(self.gripper.dof)
-
+            print(self.gripper.current_action)
+        # joint_pos = np.array ([-0.44227073,  1.04602588, -0.05149248, -1.6102527,  1.04177002,  1.42582655,
+                            #  -2.11462576])
+#         q_poses = np.array([-.525921590, 1.68833277,  .274906818, -.524590315,
+#   1.21150033, 1.74212752, .134323087,  .0400002108,
+#  -.0399945388,  .0102953258,  .0125387353,  .820906786,
+#  -.945888406, 0,  0,  .324492100])
         # Update base pos / ori references in controller
         self.controller.update_base_pose(self.base_pos, self.base_ori)
+        print(self.base_pos)
+        print(self.base_ori)
 
         # # Setup buffers to hold recent values
         self.recent_ee_forcetorques = DeltaBuffer(dim=6)
@@ -191,6 +201,8 @@ class SingleArm(Manipulator):
         self.recent_ee_vel = DeltaBuffer(dim=6)
         self.recent_ee_vel_buffer = RingBuffer(dim=6, length=10)
         self.recent_ee_acc = DeltaBuffer(dim=6)
+        # self.sim.data.qpos = q_poses
+
 
     def setup_references(self):
         """
@@ -259,6 +271,8 @@ class SingleArm(Manipulator):
 
         # Apply joint torque control
         self.sim.data.ctrl[self._ref_joint_actuator_indexes] = self.torques
+
+        # print(self.sim.data.qpos)
 
         # If this is a policy step, also update buffers holding recent values of interest
         if policy_step:
