@@ -4,17 +4,19 @@ import numpy as np
 
 from robosuite.environments.manipulation.single_arm_env import SingleArmEnv
 from robosuite.models.arenas import TableArena
-from robosuite.models.objects import DoorObject
+from robosuite.models.objects import BoxObject
 from robosuite.models.tasks import ManipulationTask
+from robosuite.utils.mjcf_utils import CustomMaterial
 from robosuite.utils.observables import Observable, sensor
 from robosuite.utils.placement_samplers import UniformRandomSampler
+from robosuite.utils.transform_utils import convert_quat
 
 
-class Door(SingleArmEnv):
+class Lift(SingleArmEnv):
     """
-    This class corresponds to the door opening task for a single robot arm.
+    This class corresponds to the lifting task for a single robot arm.
 
-    Args:
+    Args:q
         robots (str or list of str): Specification for specific robot arm(s) to be instantiated within this env
             (e.g: "Sawyer" would generate one arm; ["Panda", "Panda", "Sawyer"] would generate three robot arms)
             Note: Must be a single single-arm robot!
@@ -48,8 +50,10 @@ class Door(SingleArmEnv):
             :Note: Specifying "default" will automatically use the default noise settings.
                 Specifying None will automatically create the required dict with "magnitude" set to 0.0.
 
-        use_latch (bool): if True, uses a spring-loaded handle and latch to "lock" the door closed initially
-            Otherwise, door is instantiated with a fixed handle
+        table_full_size (3-tuple): x, y, and z dimensions of the table.
+
+        table_friction (3-tuple): the three mujoco friction parameters for
+            the table.
 
         use_camera_obs (bool): if True, every observation includes rendered image(s)
 
@@ -136,7 +140,8 @@ class Door(SingleArmEnv):
         controller_configs=None,
         gripper_types="default",
         initialization_noise="default",
-        use_latch=True,
+        table_full_size=(0.8, 0.8, 0.05),
+        table_friction=(1.0, 5e-3, 1e-4),
         use_camera_obs=True,
         use_object_obs=True,
         reward_scale=1.0,
@@ -160,12 +165,12 @@ class Door(SingleArmEnv):
         renderer="mujoco",
         renderer_config=None,
     ):
-        # settings for table top (hardcoded since it's not an essential part of the environment)
-        self.table_full_size = (0.8, 0.3, 0.05)
-        self.table_offset = (-0.2, -0.35, 0.8)
+        # settings for table top
+        self.table_full_size = table_full_size
+        self.table_friction = table_friction
+        self.table_offset = np.array((0, 0, 0.8))
 
         # reward configuration
-        self.use_latch = use_latch
         self.reward_scale = reward_scale
         self.reward_shaping = reward_shaping
 
@@ -208,22 +213,21 @@ class Door(SingleArmEnv):
 
         Sparse un-normalized reward:
 
-            - a discrete reward of 1.0 is provided if the door is opened
+            - a discrete reward of 2.25 is provided if the cube is lifted
 
         Un-normalized summed components if using reward shaping:
 
-            - Reaching: in [0, 0.25], proportional to the distance between door handle and robot arm
-            - Rotating: in [0, 0.25], proportional to angle rotated by door handled
-              - Note that this component is only relevant if the environment is using the locked door version
+            - Reaching: in [0, 1], to encourage the arm to reach the cube
+            - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
+            - Lifting: in {0, 1}, non-zero if arm has lifted the cube
 
-        Note that a successfully completed task (door opened) will return 1.0 irregardless of whether the environment
-        is using sparse or shaped rewards
+        The sparse reward only consists of the lifting component.
 
-        Note that the final reward is normalized and scaled by reward_scale / 1.0 as
-        well so that the max score is equal to reward_scale
+        Note that the final reward is normalized and scaled by
+        reward_scale / 2.25 as well so that the max score is equal to reward_scale
 
         Args:
-            action (np.array): [NOT USED]
+            action (np array): [NOT USED]
 
         Returns:
             float: reward value
@@ -232,22 +236,25 @@ class Door(SingleArmEnv):
 
         # sparse completion reward
         if self._check_success():
-            reward = 1.0
+            reward = 2.25
 
-        # else, we consider only the case if we're using shaped rewards
+        # use a shaping reward
         elif self.reward_shaping:
-            # Add reaching component
-            dist = np.linalg.norm(self._gripper_to_handle)
-            reaching_reward = 0.25 * (1 - np.tanh(10.0 * dist))
+
+            # reaching reward
+            cube_pos = self.sim.data.body_xpos[self.cube_body_id]
+            gripper_site_pos = self.sim.data.site_xpos[self.robots[0].eef_site_id]
+            dist = np.linalg.norm(gripper_site_pos - cube_pos)
+            reaching_reward = 1 - np.tanh(10.0 * dist)
             reward += reaching_reward
-            # Add rotating component if we're using a locked door
-            if self.use_latch:
-                handle_qpos = self.sim.data.qpos[self.handle_qpos_addr]
-                reward += np.clip(0.25 * np.abs(handle_qpos / (0.5 * np.pi)), -0.25, 0.25)
+
+            # grasping reward
+            if self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube):
+                reward += 0.25
 
         # Scale reward if requested
         if self.reward_scale is not None:
-            reward *= self.reward_scale / 1.0
+            reward *= self.reward_scale / 2.25
 
         return reward
 
@@ -264,49 +271,59 @@ class Door(SingleArmEnv):
         # load model for table top workspace
         mujoco_arena = TableArena(
             table_full_size=self.table_full_size,
+            table_friction=self.table_friction,
             table_offset=self.table_offset,
         )
 
         # Arena always gets set to zero origin
         mujoco_arena.set_origin([0, 0, 0])
 
-        # Modify default agentview camera
-        mujoco_arena.set_camera(
-            camera_name="agentview",
-            pos=[0.5986131746834771, -4.392035683362857e-09, 1.5903500240372423],
-            quat=[0.6380177736282349, 0.3048497438430786, 0.30484986305236816, 0.6380177736282349],
-        )
-
         # initialize objects of interest
-        self.door = DoorObject(
-            name="Door",
-            friction=0.0,
-            damping=0.1,
-            lock=self.use_latch,
+        tex_attrib = {
+            "type": "cube",
+        }
+        mat_attrib = {
+            "texrepeat": "1 1",
+            "specular": "0.4",
+            "shininess": "0.1",
+        }
+        redwood = CustomMaterial(
+            texture="WoodRed",
+            tex_name="redwood",
+            mat_name="redwood_mat",
+            tex_attrib=tex_attrib,
+            mat_attrib=mat_attrib,
+        )
+        self.cube = BoxObject(
+            name="cube",
+            size_min=[0.020, 0.020, 0.020],  # [0.015, 0.015, 0.015],
+            size_max=[0.022, 0.022, 0.022],  # [0.018, 0.018, 0.018])
+            rgba=[1, 0, 0, 1],
+            material=redwood,
         )
 
         # Create placement initializer
         if self.placement_initializer is not None:
             self.placement_initializer.reset()
-            self.placement_initializer.add_objects(self.door)
+            self.placement_initializer.add_objects(self.cube)
         else:
             self.placement_initializer = UniformRandomSampler(
                 name="ObjectSampler",
-                mujoco_objects=self.door,
-                x_range=[0.07, 0.09],
-                y_range=[-0.01, 0.01],
-                rotation=(-np.pi / 2.0 - 0.25, -np.pi / 2.0),
-                rotation_axis="z",
+                mujoco_objects=self.cube,
+                x_range=[-0.03, 0.03],
+                y_range=[-0.03, 0.03],
+                rotation=None,
                 ensure_object_boundary_in_range=False,
-                ensure_valid_placement=True,
+                ensure_valid_placement=False,
                 reference_pos=self.table_offset,
+                z_offset=0.5
             )
 
         # task includes arena, robot, and objects of interest
         self.model = ManipulationTask(
             mujoco_arena=mujoco_arena,
             mujoco_robots=[robot.robot_model for robot in self.robots],
-            mujoco_objects=self.door,
+            mujoco_objects=self.cube,
         )
 
     def _setup_references(self):
@@ -318,14 +335,7 @@ class Door(SingleArmEnv):
         super()._setup_references()
 
         # Additional object references from this env
-        self.object_body_ids = dict()
-        self.object_body_ids["door"] = self.sim.model.body_name2id(self.door.door_body)
-        self.object_body_ids["frame"] = self.sim.model.body_name2id(self.door.frame_body)
-        self.object_body_ids["latch"] = self.sim.model.body_name2id(self.door.latch_body)
-        self.door_handle_site_id = self.sim.model.site_name2id(self.door.important_sites["handle"])
-        self.hinge_qpos_addr = self.sim.model.get_joint_qpos_addr(self.door.joints[0])
-        if self.use_latch:
-            self.handle_qpos_addr = self.sim.model.get_joint_qpos_addr(self.door.joints[1])
+        self.cube_body_id = self.sim.model.body_name2id(self.cube.root_body)
 
     def _setup_observables(self):
         """
@@ -342,47 +352,25 @@ class Door(SingleArmEnv):
             pf = self.robots[0].robot_model.naming_prefix
             modality = "object"
 
-            # Define sensor callbacks
+            # cube-related observables
             @sensor(modality=modality)
-            def door_pos(obs_cache):
-                return np.array(self.sim.data.body_xpos[self.object_body_ids["door"]])
+            def cube_pos(obs_cache):
+                return np.array(self.sim.data.body_xpos[self.cube_body_id])
 
             @sensor(modality=modality)
-            def handle_pos(obs_cache):
-                return self._handle_xpos
+            def cube_quat(obs_cache):
+                return convert_quat(np.array(self.sim.data.body_xquat[self.cube_body_id]), to="xyzw")
 
             @sensor(modality=modality)
-            def door_to_eef_pos(obs_cache):
+            def gripper_to_cube_pos(obs_cache):
                 return (
-                    obs_cache["door_pos"] - obs_cache[f"{pf}eef_pos"]
-                    if "door_pos" in obs_cache and f"{pf}eef_pos" in obs_cache
+                    obs_cache[f"{pf}eef_pos"] - obs_cache["cube_pos"]
+                    if f"{pf}eef_pos" in obs_cache and "cube_pos" in obs_cache
                     else np.zeros(3)
                 )
 
-            @sensor(modality=modality)
-            def handle_to_eef_pos(obs_cache):
-                return (
-                    obs_cache["handle_pos"] - obs_cache[f"{pf}eef_pos"]
-                    if "handle_pos" in obs_cache and f"{pf}eef_pos" in obs_cache
-                    else np.zeros(3)
-                )
-
-            @sensor(modality=modality)
-            def hinge_qpos(obs_cache):
-                return np.array([self.sim.data.qpos[self.hinge_qpos_addr]])
-
-            sensors = [door_pos, handle_pos, door_to_eef_pos, handle_to_eef_pos, hinge_qpos]
+            sensors = [cube_pos, cube_quat, gripper_to_cube_pos]
             names = [s.__name__ for s in sensors]
-
-            # Also append handle qpos if we're using a locked door version with rotatable handle
-            if self.use_latch:
-
-                @sensor(modality=modality)
-                def handle_qpos(obs_cache):
-                    return np.array([self.sim.data.qpos[self.handle_qpos_addr]])
-
-                sensors.append(handle_qpos)
-                names.append("handle_qpos")
 
             # Create observables
             for name, s in zip(names, sensors):
@@ -400,31 +388,22 @@ class Door(SingleArmEnv):
         """
         super()._reset_internal()
 
+        self.sim.model.opt.gravity[2] = -0.05
+        # print(self.sim.model.opt.gravity)
+
         # Reset all object positions using initializer sampler if we're not directly loading from an xml
         if not self.deterministic_reset:
 
             # Sample from the placement initializer for all objects
             object_placements = self.placement_initializer.sample()
 
-            # We know we're only setting a single object (the door), so specifically set its pose
-            door_pos, door_quat, _ = object_placements[self.door.name]
-            door_body_id = self.sim.model.body_name2id(self.door.root_body)
-            self.sim.model.body_pos[door_body_id] = door_pos
-            self.sim.model.body_quat[door_body_id] = door_quat
-
-    def _check_success(self):
-        """
-        Check if door has been opened.
-
-        Returns:
-            bool: True if door has been opened
-        """
-        hinge_qpos = self.sim.data.qpos[self.hinge_qpos_addr]
-        return hinge_qpos > 0.3
+            # Loop through all objects and reset their positions
+            for obj_pos, obj_quat, obj in object_placements.values():
+                self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([np.array(obj_pos), np.array(obj_quat)]))
 
     def visualize(self, vis_settings):
         """
-        In addition to super call, visualize gripper site proportional to the distance to the door handle.
+        In addition to super call, visualize gripper site proportional to the distance to the cube.
 
         Args:
             vis_settings (dict): Visualization keywords mapped to T/F, determining whether that specific
@@ -434,30 +413,48 @@ class Door(SingleArmEnv):
         # Run superclass method first
         super().visualize(vis_settings=vis_settings)
 
-        # Color the gripper visualization site according to its distance to the door handle
+        # Color the gripper visualization site according to its distance to the cube
         if vis_settings["grippers"]:
-            self._visualize_gripper_to_target(
-                gripper=self.robots[0].gripper, target=self.door.important_sites["handle"], target_type="site"
-            )
+            self._visualize_gripper_to_target(gripper=self.robots[0].gripper, target=self.cube)
 
-    @property
-    def _handle_xpos(self):
-        """
-        Grabs the position of the door handle handle.
+    def _check_success(self):
+       
+    # Assuming simple distance-based collision detection
+        gripper_site_pos = self.sim.data.site_xpos[self.robots[0].eef_site_id] # position of the gripper
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id] # position of the cube
+        # TODO: check for collision between robot and hand
+        distance = (gripper_site_pos - cube_pos) # x y z difference
+        my_val = np.linalg.norm(distance)
+        # print(my_val)
+        return  my_val  < 0.08 # perfect distance
+        # reward_function = 1 - np.tanh(0.1 * distance)
+       
+        # for collision in self.sim.data.contact:# if positions are equal then return True
+        #     if collision.geom == gripper_site_pos and collision.geom == cube_pos: # used physics engines geoms from MoJoCu
+        #         return True
+        #     elif collision.geom == cube_pos and collision.geom == gripper_site_pos:
+        #          return True
+        
+        return False
 
-        Returns:
-            np.array: Door handle (x,y,z)
-        """
-        return self.sim.data.site_xpos[self.door_handle_site_id]
+# egl => graphics check
 
-    @property
-    def _gripper_to_handle(self):
-        """
-        Calculates distance from the gripper to the door handle.
 
-        Returns:
-            np.array: (x,y,z) distance between handle and eef
-        """
-        return self._handle_xpos - self._eef_xpos
-# HOW TO PULL UP THE ACTUAL DEMO
-# add method move with keys ==> env.dot_testwithkeys
+# Collision detected
+         
+        # cube is higher than the table top above a margin
+        # return cube_height > table_height + 0.04        ==> completes demonstartion before it started becauuse cube is above the table
+
+
+# # def _check_success(self):
+#         """
+#         Check if cube has been lifted.
+
+#         Returns:
+#             bool: True if cube has been lifted
+#         """
+#         cube_height = self.sim.data.body_xpos[self.cube_body_id][2]
+#         table_height = self.model.mujoco_arena.table_offset[2]
+
+#         # cube is higher than the table top above a margin
+#         return cube_height > table_height + 0.04

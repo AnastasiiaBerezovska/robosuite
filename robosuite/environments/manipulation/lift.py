@@ -1,7 +1,5 @@
 from collections import OrderedDict
-
 import numpy as np
-
 from robosuite.environments.manipulation.single_arm_env import SingleArmEnv
 from robosuite.models.arenas import TableArena
 from robosuite.models.objects import BoxObject
@@ -316,7 +314,7 @@ class Lift(SingleArmEnv):
                 ensure_object_boundary_in_range=False,
                 ensure_valid_placement=False,
                 reference_pos=self.table_offset,
-                z_offset=0.1
+                z_offset=0.5
             )
 
         # task includes arena, robot, and objects of interest
@@ -388,7 +386,8 @@ class Lift(SingleArmEnv):
         """
         super()._reset_internal()
 
-        self.sim.model.opt.gravity[-1] = 0.0
+        self.sim.model.opt.gravity[2] = 0
+        #  print(self.sim.model.opt.gravity)
 
         # Reset all object positions using initializer sampler if we're not directly loading from an xml
         if not self.deterministic_reset:
@@ -417,43 +416,92 @@ class Lift(SingleArmEnv):
             self._visualize_gripper_to_target(gripper=self.robots[0].gripper, target=self.cube)
 
     def _check_success(self):
-       
-    # Assuming simple distance-based collision detection
-        gripper_site_pos = self.sim.data.site_xpos[self.robots[0].eef_site_id] # position of the gripper
-        cube_pos = self.sim.data.body_xpos[self.cube_body_id] # position of the cube
+
+        # Assuming simple distance-based collision detection
+        gripper_site_pos = self.sim.data.site_xpos[self.robots[0].eef_site_id]  # position of the gripper
+        cube_pos = self.sim.data.body_xpos[self.cube_body_id]  # position of the cube
         # TODO: check for collision between robot and hand
-        distance = (gripper_site_pos - cube_pos) # x y z difference
+        distance = (gripper_site_pos - cube_pos)  # x y z difference
         my_val = np.linalg.norm(distance)
         # print(my_val)
-        return  my_val  < 0.05 # perfect distance
-        # reward_function = 1 - np.tanh(0.1 * distance)
-       
-        # for collision in self.sim.data.contact:# if positions are equal then return True
-        #     if collision.geom == gripper_site_pos and collision.geom == cube_pos: # used physics engines geoms from MoJoCu
-        #         return True
-        #     elif collision.geom == cube_pos and collision.geom == gripper_site_pos:
-        #          return True
+        return my_val < 0.08  # perfect distance
+    
+
+
+
+	# review These functions
+
+    def stepFunction(self, action):
         
-        return False
+        print("Printing action here", action)
+    
+        joint_action = np.zeros(self.sim.data.ctrl.shape) # shape 
 
-# egl => graphics check
+        # joint_action[2] = action[2]
+        
+        # self.sim.data.ctrl[:] = joint_action
+    
+        self.sim.step()
+
+        self.render()
+
+        # Return observation, reward, done, info
+        reward = self.reward(joint_action)
+        done = self._check_success()
+        
+        return reward, done
 
 
-# Collision detected
-         
-        # cube is higher than the table top above a margin
-        # return cube_height > table_height + 0.04        ==> completes demonstartion before it started becauuse cube is above the table
 
 
-# # def _check_success(self):
-#         """
-#         Check if cube has been lifted.
 
-#         Returns:
-#             bool: True if cube has been lifted
-#         """
-#         cube_height = self.sim.data.body_xpos[self.cube_body_id][2]
-#         table_height = self.model.mujoco_arena.table_offset[2]
 
-#         # cube is higher than the table top above a margin
-#         return cube_height > table_height + 0.04
+
+ #   for pip install stable-baselines3[extra]
+    def reward(self, action=None):
+       
+        reward = 0.0
+
+        current_position = self.sim.data.get_site_xpos('gripper0_grip_site')  # or 'gripper0_ee_z'
+
+        # (up/down)
+        action_z_axis = action[0]  
+        # previous pos of end effector
+        if not hasattr(self, 'prev_position'):  # attribute name 
+            self.prev_position = current_position
+
+        actual_position = current_position - self.prev_position
+        actual_z = actual_position[2] # (up/down)
+
+        # Update previous position for the next step
+        self.prev_position = current_position
+
+        # reward for correct z-axis movement // for z movement, should I have changes for x, y ? 
+        if actual_z > 0 and action_z_axis > 0:
+            # Positive reward for moving up 
+            reward += 1.0
+        elif actual_z < 0 and action_z_axis < 0:
+            # Positive reward for moving down 
+            reward += 1.0
+        else:
+            # Negative reward for oving sideways
+            reward -= 1.0
+
+        # penalties or rewards for chaotic movements in x or y
+        if abs(actual_position[0]) > 0.05 or abs(actual_position[1]) > 0.05:
+            # Penalize for sideways movement
+            reward -= 0.5
+
+        # dditional reward if the robot is successfully moving the object in the z-axis (lifting)
+        if self._check_success():
+            reward += 2.25 
+            
+        return reward
+
+
+
+
+
+
+
+print("This is my Environment that Loads and which I will Modify")
