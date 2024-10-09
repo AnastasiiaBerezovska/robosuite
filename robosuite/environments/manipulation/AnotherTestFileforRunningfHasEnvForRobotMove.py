@@ -15,6 +15,7 @@ env = Lift(
     controller_configs=my_controller_config  # Controller configuration
 )
 
+#breakpoint()
 
  # make robot raise the arm
 
@@ -26,7 +27,7 @@ switch_i_frequency = 300 # other nums don't let it switch fast enought it just k
 # Main simulation loop
 
 for i in range(2000):
-    action = np.zeros(9)
+    action = np.zeros(8)
     if (i // switch_i_frequency) % 2 == 0:
         action[0] = 5000
         action[1] = 1000  # Apply downward force to joint 2 (you may need to adjust this joint)
@@ -37,7 +38,7 @@ for i in range(2000):
         action[5] = 0
         action[6] = 0
         action[7] = 0
-        action[8] = 0
+        # action[8] = 0
 
     else:
         action[0] = -5000
@@ -51,9 +52,10 @@ for i in range(2000):
         action[7] = 0
         action[8] = 0
 
-    env.sim.data.ctrl[:] = action
+    #env.sim.data.ctrl[:] = action
     reward, done = env.stepFunction(action)  # Take action in the environment
     reward = env.reward(action)
+    obs, reward, done, info = env.step(action)
     env.render()  # Render the simulation
 
     print("Joint positions:", env.sim.data.qpos)
@@ -61,6 +63,9 @@ for i in range(2000):
     #print("Joint velocities:", env.sim.data.qvel)
 
 env.reset()
+
+
+# train it through the rl policy
 
 
   

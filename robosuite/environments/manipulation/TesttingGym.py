@@ -17,8 +17,8 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 
 from typing import Callable
 
-from my_models.grippers import UltrasoundProbeGripper
-from my_environments import Ultrasound
+# from my_models.grippers import UltrasoundProbeGripper
+# from my_environments import Ultrasound
 from utils.common import register_gripper
 
 import gym

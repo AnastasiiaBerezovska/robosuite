@@ -1,0 +1,89 @@
+import argparse
+import json
+import os
+import h5py
+from glob import glob
+from collections import Counter
+import numpy as np
+import datetime
+
+
+def concat_multitask_hdf5(hdf5_list, out_dir):
+    """Used to concat datasets for experimentation in railrl"""
+    out_path = os.path.join(out_dir, "combined.hdf5")
+    f_out = h5py.File(out_path, mode='w')
+    f_out_data_grp = f_out.create_group("data")
+
+    # Copy trajs one by one
+    cur_demo_num = 0
+    for h5name in hdf5_list:
+        try:
+            h5fr = h5py.File(h5name,'r')
+            # test accessing data
+            h5fr['data']
+        except:
+            # error during saving
+            print(f"skipped {h5name}, bad file.")
+            continue
+
+        for demo_name in h5fr[f'data'].keys():
+            f_out_demo_name = f"demo_{cur_demo_num}"
+            h5fr.copy(
+                f"data/{demo_name}", f_out_data_grp,
+                name=f_out_demo_name)
+            cur_demo_num += 1
+
+
+    # this chunk is the same as concat_hdf5
+    # write dataset attributes (metadata)
+    now = datetime.datetime.now()
+    f_out_data_grp.attrs["date"] = "{}-{}-{}".format(now.month, now.day, now.year)
+    f_out_data_grp.attrs["time"] = "{}:{}:{}".format(now.hour, now.minute, now.second)
+
+    f_out_data_grp.attrs["orig_hdf5_list"] = hdf5_list
+    print("saved to", out_path)
+    f_out.close()
+
+    return out_path
+
+def maybe_create_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+    return path
+
+
+def load_env_info(env_name):
+    config = {"env_name": env_name}
+    env_info = json.dumps(config)
+    return env_info
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--hdfs", nargs="+", type=str, default=[])
+    parser.add_argument("-d", "--save-directory", type=str, required=True)
+    args = parser.parse_args()
+
+    if len(args.hdfs) >= 1:
+        hdf5_paths = args.hdfs
+        out_dir = maybe_create_dir(args.save_directory)
+        if len(args.hdfs) == 1:
+            assert args.remove_next_obs
+            input("You only have one dataset to concatenate, are you sure? CTRL+C to quit.")
+    elif len(args.hdfs) == 0:
+        # Search for *.hdf5 files in args.save_directory, concatenate them all.
+        data_save_path = maybe_create_dir(args.save_directory)
+        thread_outpaths = os.path.join(data_save_path, "*.hdf5")
+        hdf5_paths = list(glob(thread_outpaths))
+        out_dir = data_save_path
+
+    print("hdf5_paths", hdf5_paths)
+    
+    kwargs = {}
+    concat_fn = concat_multitask_hdf5(hdf5_paths, out_dir)
+
+    # Clean up tmp files
+    tmp_dir = f"{args.save_directory}/tmp/"
+    if os.path.exists(tmp_dir):
+        os.system(f"rm -r {tmp_dir}")
+        print(f"Removed {tmp_dir}")

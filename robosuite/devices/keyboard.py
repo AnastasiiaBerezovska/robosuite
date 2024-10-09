@@ -119,6 +119,9 @@ class Keyboard(Device):
             elif key.char == "r":
                 self.pos[2] += self._pos_step * self.pos_sensitivity  # inc z
 
+            # add keys to change the position of the robot right away
+            # 
+
             # controls for moving orientation
             elif key.char == "z":
                 drot = rotation_matrix(angle=0.1 * self.rot_sensitivity, direction=[1.0, 0.0, 0.0])[:3, :3]
